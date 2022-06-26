@@ -1,26 +1,31 @@
 #include <errno.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/inotify.h>
 #include <unistd.h>
 #include <string.h>
 
+#include <libgourou.h>
+#include <libgourou_common.h>
+
+#include "drmprocessorclientimpl.h"
+#include "utils_common.h"
+
 static const char *deviceFile = "device.xml";
 static const char *activationFile = "activation.xml";
 static const char *devicekeyFile = "devicesalt";
-static const char *acsmFile = 0;
+
+// inotify stuff
 static const int eventSize = sizeof(struct inotify_event);
 static const int eventBufferLength = 1024 * (eventSize + 16);
-static bool exportPrivateKey = false;
-static const char *outputFile = 0;
-static const char *outputDir = 0;
-static bool resume = false;
 
 class ACSMInotifyDownloader
 {
+private:
+    DRMProcessorClientImpl client;
+
 public:
-    int run()
+    int run(const char *path)
     {
         int fd;
         int wd;
@@ -35,33 +40,36 @@ public:
             exit(EXIT_FAILURE);
         }
 
-        wd = inotify_add_watch(fd, "/home/aufanabilamiri/Projects/libgourou-inotify/utils/testing", IN_CREATE);
+        wd = inotify_add_watch(fd, path, IN_CREATE);
         if (wd == -1)
         {
-            fprintf(stderr, "Cannot watch '%s': %s\n", "duar", strerror(errno));
+            fprintf(stderr, "Cannot watch '%s': %s\n", path, strerror(errno));
             exit(EXIT_FAILURE);
         }
 
-        length = read(fd, buffer, sizeof(buffer));
-        if (length == -1 && errno != EAGAIN)
+        while (1)
         {
-            perror("read");
-            exit(EXIT_FAILURE);
-        }
-
-        if (length < 0)
-        {
-            perror("read");
-            exit(EXIT_FAILURE);
-        }
-
-        for (char *ptr = buffer; ptr < buffer + length; ptr += sizeof(struct inotify_event) + event->len)
-        {
-            event = (struct inotify_event *)ptr;
-
-            if (event->len)
+            length = read(fd, buffer, sizeof(buffer));
+            if ((length == -1 && errno != EAGAIN) || length < 0)
             {
-                printf("New file has been created : %s", event->name);
+                perror("read");
+                exit(EXIT_FAILURE);
+            }
+
+            for (char *ptr = buffer; ptr < buffer + length; ptr += sizeof(struct inotify_event) + event->len)
+            {
+                event = (struct inotify_event *)ptr;
+
+                if (event->len)
+                {
+                    char *acsmFile = event->name;
+
+                    if (endsWith(acsmFile, ".acsm"))
+                    {
+                        printf("new acsm file has been detected : %s \n", event->name);
+                        retreiveContent(path, acsmFile);
+                    }
+                }
             }
         }
 
@@ -69,12 +77,74 @@ public:
         close(fd);
         return 0;
     }
+
+    int retreiveContent(const char *path, const char *acsmFile)
+    {
+        try
+        {
+            gourou::DRMProcessor processor(&client, deviceFile, activationFile, devicekeyFile);
+
+            // fulfilling metadata
+            std::string acsmPathFile = std::string(path) + "/" + std::string(acsmFile);
+            gourou::FulfillmentItem *item = processor.fulfill(acsmPathFile);
+
+            std::string filename = item->getMetadata("title");
+            if (filename == "")
+                filename = "output";
+            else
+            {
+                // Remove invalid characters
+                std::replace(filename.begin(), filename.end(), '/', '_');
+            }
+
+            // we want to put the resulting file into the same path
+            filename = std::string(path) + "/" + filename;
+
+            // downloading content
+            gourou::DRMProcessor::ITEM_TYPE type = processor.download(item, filename, false);
+            std::cout << "success downloading : " << filename << std::endl;
+
+            std::string finalName = filename;
+            if (type == gourou::DRMProcessor::ITEM_TYPE::PDF)
+            {
+                finalName += ".pdf";
+                processor.removeDRM(filename, finalName, type);
+            }
+            else
+            {
+                finalName += ".epub";
+                rename(filename.c_str(), finalName.c_str());
+                processor.removeDRM(finalName, finalName, type);
+            }
+
+            std::cout << "" << std::endl;
+            std::cout << filename << "drm removed, result :" << finalName << std::endl;
+        }
+        catch (std::exception &e)
+        {
+            std::cout << e.what() << std::endl;
+        }
+
+        return 0;
+    }
+
+    static inline bool endsWith(const std::string &s, const std::string &suffix)
+    {
+        return s.rfind(suffix) == std::abs((int)(s.size() - suffix.size()));
+    }
 };
 
 int main(int argc, char *argv[])
 {
     ACSMInotifyDownloader inotifyDownloader;
 
-    inotifyDownloader.run();
+    if (argc != 2)
+    {
+        printf("path is required ! \n");
+        return 0;
+    }
+
+    printf("%s \n", argv[1]);
+    inotifyDownloader.run(argv[1]);
     return 0;
 }

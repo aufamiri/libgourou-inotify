@@ -1,0 +1,8 @@
+.vscode/*
+libgourou/*
+test/*
+
+*.xml
+devicesalt
+
+adept_inotify
